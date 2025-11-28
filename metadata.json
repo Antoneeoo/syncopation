@@ -1,5 +1,5 @@
 {
-  "name": "VitalSync AI",
+  "name": "Syncopation",
   "description": "A dual-interface health monitoring system (Wearable & Companion) using Gemini AI for anomaly detection and pattern recognition.",
   "requestFramePermissions": [
     "geolocation"
