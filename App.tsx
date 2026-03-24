@@ -1,226 +1,232 @@
+
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { AppMode, VitalSigns, EmergencyContact, HealthAnalysis, SyncMessage } from './types';
+import { AppMode, VitalSigns, Patient, EmergencyContact, SyncMessage, DeviceConnection } from './types';
 import WearableInterface from './components/WearableInterface';
 import CompanionDashboard from './components/CompanionDashboard';
-import { analyzeVitals } from './services/geminiService';
+import { analyzePatientHealth, detectFalls } from './services/geminiService';
 
-const BROADCAST_CHANNEL_NAME = 'vitals_sync_channel';
+const BROADCAST_CHANNEL_NAME = 'vitalsync_enterprise_mesh';
 
-// Mock initial vitals
-const INITIAL_VITALS: VitalSigns = {
-  timestamp: Date.now(),
-  heartRate: 75,
-  spo2: 98,
-  temperature: 36.6,
-  systolic: 120,
-  diastolic: 80,
-  steps: 1240,
-  stressLevel: 25,
-  isSleeping: false,
-};
+const DEFAULT_PATIENTS: Patient[] = [
+  {
+    id: 'p1',
+    name: 'Dr. Johnathan Doe',
+    age: 58,
+    gender: 'Male',
+    bloodType: 'O+',
+    vitals: { timestamp: Date.now(), heartRate: 72, spo2: 98, temperature: 36.6, systolic: 125, diastolic: 82, steps: 2400, stressLevel: 15, isSleeping: false, accelerometer: { x: 0, y: 0.2, z: 9.8 } },
+    history: [],
+    analysis: null
+  },
+  {
+    id: 'p2',
+    name: 'Sarah Jane Smith',
+    age: 29,
+    gender: 'Female',
+    bloodType: 'B-',
+    vitals: { timestamp: Date.now(), heartRate: 65, spo2: 99, temperature: 36.7, systolic: 110, diastolic: 70, steps: 8900, stressLevel: 10, isSleeping: false, accelerometer: { x: 0, y: 0.1, z: 9.9 } },
+    history: [],
+    analysis: null
+  }
+];
+
+const MOCK_DEVICES: DeviceConnection[] = [
+  { id: 'd1', name: 'VitalWatch Elite v4', type: 'WATCH', status: 'CONNECTED', battery: 92 },
+  { id: 'd2', name: 'NanoPulse Chest Strap', type: 'STRAP', status: 'DISCONNECTED', battery: 12 },
+  { id: 'd3', name: 'BioSense Skin Patch', type: 'PATCH', status: 'SYNCING', battery: 100 }
+];
 
 const App: React.FC = () => {
   const [mode, setMode] = useState<AppMode>(AppMode.SELECT);
-  const [vitals, setVitals] = useState<VitalSigns>(INITIAL_VITALS);
-  const [history, setHistory] = useState<VitalSigns[]>([INITIAL_VITALS]);
-  const [emergencyContacts, setEmergencyContacts] = useState<EmergencyContact[]>([
-    { id: '1', name: 'Dr. Smith', phone: '555-0123', isAutoDial: true }
-  ]);
+  const [patients, setPatients] = useState<Patient[]>(DEFAULT_PATIENTS);
+  const [activePatientId, setActivePatientId] = useState<string>(DEFAULT_PATIENTS[0].id);
   const [isEmergency, setIsEmergency] = useState(false);
-  const [analysis, setAnalysis] = useState<HealthAnalysis | null>(null);
   const [isAnalysing, setIsAnalysing] = useState(false);
+  const [devices, setDevices] = useState<DeviceConnection[]>(MOCK_DEVICES);
 
-  // Sync Channel
   const channelRef = useRef<BroadcastChannel | null>(null);
 
+  // Synchronization initialization
   useEffect(() => {
     channelRef.current = new BroadcastChannel(BROADCAST_CHANNEL_NAME);
-    
     channelRef.current.onmessage = (event) => {
-      const message: SyncMessage = event.data;
-      if (message.type === 'VITALS_UPDATE') {
-        const newVitals = message.payload;
-        setVitals(newVitals);
-        setHistory(prev => [...prev, newVitals].slice(-100)); // Keep last 100
-      } else if (message.type === 'EMERGENCY_TRIGGER') {
-        setIsEmergency(message.payload);
-      } else if (message.type === 'ANALYSIS_UPDATE') {
-        setAnalysis(message.payload);
+      const msg: SyncMessage = event.data;
+      if (msg.type === 'PATIENT_UPDATE') {
+        setPatients(prev => prev.map(p => p.id === msg.payload.id ? msg.payload : p));
+      } else if (msg.type === 'SOS_TRIGGER') {
+        setIsEmergency(msg.payload);
+      } else if (msg.type === 'DEVICE_UPDATE') {
+        setDevices(msg.payload);
       }
     };
-
-    return () => {
-      channelRef.current?.close();
-    };
+    return () => channelRef.current?.close();
   }, []);
 
   const broadcast = useCallback((type: SyncMessage['type'], payload: any) => {
     channelRef.current?.postMessage({ type, payload });
   }, []);
 
-  // --- Wearable Logic (Data Generation) ---
+  const handleTriggerAnalysis = async () => {
+    const activePatient = patients.find(p => p.id === activePatientId);
+    if (!activePatient || isAnalysing) return;
+
+    setIsAnalysing(true);
+    const result = await analyzePatientHealth(activePatient);
+    
+    setPatients(prev => prev.map(p => {
+      if (p.id !== activePatientId) return p;
+      const updated = { ...p, analysis: result };
+      broadcast('PATIENT_UPDATE', updated);
+      return updated;
+    }));
+    setIsAnalysing(false);
+  };
+
+  // AUTOMATIC GUARDIAN LOOP: Autonomously monitor the active patient
+  useEffect(() => {
+    const activePatient = patients.find(p => p.id === activePatientId);
+    if (!activePatient || isAnalysing || mode === AppMode.SELECT) return;
+
+    const v = activePatient.vitals;
+    // Agentic threshold check: If HR > 115, SpO2 < 93, Temp > 38.5, or BP is abnormal, run AI check automatically
+    const isCritical = v.heartRate > 115 || v.spo2 < 93 || v.temperature > 38.5 || v.systolic > 160 || v.diastolic > 100 || v.systolic < 90;
+    
+    if (isCritical && !activePatient.analysis?.status.includes('CRITICAL')) {
+      handleTriggerAnalysis();
+    }
+  }, [patients, activePatientId, isAnalysing, mode]);
+
+  // FALL DETECTION LOOP
+  useEffect(() => {
+    if (mode !== AppMode.WEARABLE || isEmergency) return;
+    const activePatient = patients.find(p => p.id === activePatientId);
+    if (!activePatient || activePatient.history.length < 5) return;
+
+    // Fast local check before calling AI
+    const recentAccel = activePatient.vitals.accelerometer;
+    const magnitude = Math.sqrt(recentAccel.x**2 + recentAccel.y**2 + recentAccel.z**2);
+    
+    if (magnitude > 15) { // Spike detected
+      const checkFall = async () => {
+        const detected = await detectFalls(activePatient.history);
+        if (detected) {
+          setIsEmergency(true);
+          broadcast('SOS_TRIGGER', true);
+        }
+      };
+      checkFall();
+    }
+  }, [patients, activePatientId, mode, isEmergency, broadcast]);
+
+  // WEARABLE DATA GENERATION
   useEffect(() => {
     if (mode !== AppMode.WEARABLE) return;
 
     const interval = setInterval(() => {
-      setVitals(prev => {
-        // Random fluctuation logic
-        const jitter = (base: number, range: number) => base + (Math.random() * range - range/2);
-        
-        // If simulated emergency/anomaly
-        const isAnomaly = prev.heartRate > 130 || prev.spo2 < 90 || prev.temperature > 38 || prev.systolic > 140;
+      setPatients(prev => {
+        return prev.map(p => {
+          if (p.id !== activePatientId) return p;
 
-        let newHr = isAnomaly ? jitter(prev.heartRate, 5) : jitter(75, 10);
-        let newSpo2 = isAnomaly ? jitter(prev.spo2, 1) : jitter(98, 2);
-        
-        // Temp and BP fluctuations
-        let newTemp = isAnomaly ? jitter(prev.temperature, 0.2) : jitter(36.6, 0.3);
-        let newSys = isAnomaly ? jitter(prev.systolic, 5) : jitter(120, 8);
-        let newDia = isAnomaly ? jitter(prev.diastolic, 3) : jitter(80, 5);
+          const jitter = (b: number, r: number) => b + (Math.random() * r - r/2);
+          
+          // Natural drift
+          let newHr = jitter(p.vitals.heartRate, 4);
+          let newSpo2 = jitter(p.vitals.spo2, 0.5);
+          let newSystolic = jitter(p.vitals.systolic, 2);
+          let newDiastolic = jitter(p.vitals.diastolic, 1.5);
+          
+          // Keep values within realistic bounds
+          newHr = Math.max(40, Math.min(200, newHr));
+          newSpo2 = Math.max(80, Math.min(100, newSpo2));
+          newSystolic = Math.max(70, Math.min(220, newSystolic));
+          newDiastolic = Math.max(40, Math.min(130, newDiastolic));
 
-        // Clamp values
-        if(newSpo2 > 100) newSpo2 = 100;
-        
-        const newVitals: VitalSigns = {
-          ...prev,
-          timestamp: Date.now(),
-          heartRate: Math.round(newHr),
-          spo2: Math.round(newSpo2),
-          temperature: newTemp,
-          systolic: Math.round(newSys),
-          diastolic: Math.round(newDia),
-          stressLevel: Math.round(Math.max(0, Math.min(100, jitter(isAnomaly ? 85 : 25, 10)))),
-          steps: prev.isSleeping ? prev.steps : prev.steps + (Math.random() > 0.5 ? 1 : 0),
-        };
+          const newVitals: VitalSigns = {
+            ...p.vitals,
+            timestamp: Date.now(),
+            heartRate: Math.round(newHr),
+            spo2: Math.round(newSpo2),
+            systolic: Math.round(newSystolic),
+            diastolic: Math.round(newDiastolic),
+            temperature: jitter(p.vitals.temperature, 0.1),
+            steps: p.vitals.isSleeping ? p.vitals.steps : p.vitals.steps + (Math.random() > 0.85 ? 1 : 0),
+            accelerometer: {
+              x: jitter(0, 0.2),
+              y: jitter(0.2, 0.2),
+              z: jitter(9.8, 0.1)
+            }
+          };
 
-        // Check for auto-emergency condition (Persistent high HR + Low SpO2 or Hypertensive Crisis)
-        const isCritical = (newVitals.heartRate > 150 && newVitals.spo2 < 90) || (newVitals.systolic > 180);
-        
-        if (isCritical && !isEmergency) {
-             setIsEmergency(true);
-             broadcast('EMERGENCY_TRIGGER', true);
-        }
+          const updatedPatient = {
+            ...p,
+            vitals: newVitals,
+            history: [...p.history, newVitals].slice(-500)
+          };
 
-        broadcast('VITALS_UPDATE', newVitals);
-        return newVitals;
+          broadcast('PATIENT_UPDATE', updatedPatient);
+          return updatedPatient;
+        });
       });
-    }, 2000); // Update every 2 seconds
+    }, 1500); // 1.5s refresh for real-time feel
 
     return () => clearInterval(interval);
-  }, [mode, broadcast, isEmergency]);
+  }, [mode, activePatientId, broadcast]);
 
-  // --- Handlers ---
-  const handleToggleSleep = () => {
-    setVitals(prev => {
-      const newVal = { ...prev, isSleeping: !prev.isSleeping };
-      broadcast('VITALS_UPDATE', newVal);
-      return newVal;
-    });
+  const handleAddPatient = (newP: Patient) => {
+    setPatients(prev => [...prev, newP]);
+    broadcast('PATIENT_UPDATE', newP);
   };
 
-  const handleSimulateAnomaly = () => {
-    // Spike HR, Drop SpO2, Increase Temp (Fever), Spike BP (Hypertension)
-    setVitals(prev => {
-      const newVal = { 
-        ...prev, 
-        heartRate: 160, 
-        spo2: 88, 
-        stressLevel: 95,
-        temperature: 39.2, // Fever
-        systolic: 175, // Hypertension
-        diastolic: 105
-      };
-      broadcast('VITALS_UPDATE', newVal);
-      return newVal;
-    });
-  };
-
-  const handleCancelEmergency = () => {
-    setIsEmergency(false);
-    broadcast('EMERGENCY_TRIGGER', false);
-    // Reset vitals to normal
-    setVitals(prev => {
-        const newVal = { 
-          ...prev, 
-          heartRate: 75, 
-          spo2: 98, 
-          stressLevel: 20,
-          temperature: 36.6,
-          systolic: 120,
-          diastolic: 80
-        };
-        broadcast('VITALS_UPDATE', newVal);
-        return newVal;
-    });
-  };
-
-  const handleTriggerAnalysis = async () => {
-    if (history.length < 5) return;
-    setIsAnalysing(true);
-    const result = await analyzeVitals(history);
-    setAnalysis(result);
-    broadcast('ANALYSIS_UPDATE', result);
-    setIsAnalysing(false);
-  };
-
-  const handleAddContact = (contact: EmergencyContact) => {
-    setEmergencyContacts(prev => [...prev, contact]);
-  };
-  
-  const handleRemoveContact = (id: string) => {
-    setEmergencyContacts(prev => prev.filter(c => c.id !== id));
-  };
-
-
-  // --- Render ---
+  const currentPatient = patients.find(p => p.id === activePatientId) || patients[0];
 
   if (mode === AppMode.SELECT) {
     return (
-      <div className="min-h-screen bg-gray-950 flex flex-col items-center justify-center p-4">
-        <h1 className="text-4xl md:text-6xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-cyan-400 to-blue-500 mb-2 text-center">
-          VitalSync AI
-        </h1>
-        <p className="text-gray-400 mb-12 text-center max-w-md">
-          A cross-device health monitoring system powered by Gemini. Select a mode to begin.
-        </p>
+      <div className="min-h-screen bg-gray-950 flex flex-col items-center justify-center p-8 font-sans">
+        <div className="text-center mb-16 relative">
+          <div className="absolute -top-24 left-1/2 -translate-x-1/2 w-48 h-48 bg-cyan-500/10 rounded-full blur-3xl animate-pulse"></div>
+          <h1 className="text-6xl md:text-8xl font-black bg-clip-text text-transparent bg-gradient-to-br from-cyan-400 via-blue-500 to-indigo-600 mb-6 tracking-tighter leading-none">
+            VITALSYNC <span className="italic">AI</span>
+          </h1>
+          <p className="text-gray-500 font-bold uppercase tracking-[0.4em] text-xs">Autonomous Medical Mesh Network</p>
+        </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 w-full max-w-3xl">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-10 w-full max-w-5xl">
           <button 
-            onClick={() => setMode(AppMode.WEARABLE)}
-            className="group relative bg-gray-900 border border-gray-800 hover:border-cyan-500 rounded-3xl p-8 transition-all hover:scale-105"
+            onClick={() => setMode(AppMode.WEARABLE)} 
+            className="group relative bg-gray-900 border border-gray-800 hover:border-cyan-500/50 rounded-[3rem] p-12 transition-all hover:-translate-y-3 shadow-2xl flex flex-col items-start overflow-hidden"
           >
-            <div className="absolute inset-0 bg-cyan-500/10 rounded-3xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
-            <div className="flex flex-col items-center gap-4">
-              <div className="w-20 h-20 rounded-full bg-gray-800 flex items-center justify-center text-3xl text-cyan-400">
-                <i className="fas fa-watch"></i>
-              </div>
-              <h2 className="text-2xl font-bold text-white">Wearable Mode</h2>
-              <p className="text-gray-400 text-center text-sm">
-                Simulates smartwatch interface. Collects biometric data, detects falls, and monitors sleep.
-              </p>
-            </div>
+             <div className="absolute top-0 right-0 p-8 opacity-5 group-hover:opacity-20 transition-opacity">
+               <i className="fas fa-clock text-9xl"></i>
+             </div>
+             <div className="w-16 h-16 rounded-3xl bg-cyan-500/10 flex items-center justify-center text-3xl text-cyan-400 mb-8">
+               <i className="fas fa-microchip"></i>
+             </div>
+             <h3 className="text-3xl font-black uppercase mb-3 tracking-tighter">Wearable Mode</h3>
+             <p className="text-gray-500 text-lg leading-relaxed text-left font-medium">Deploy sensor node for live biometric collection, fall detection, and SOS broadcasting.</p>
           </button>
 
           <button 
-            onClick={() => setMode(AppMode.COMPANION)}
-            className="group relative bg-gray-900 border border-gray-800 hover:border-blue-500 rounded-3xl p-8 transition-all hover:scale-105"
+            onClick={() => setMode(AppMode.COMPANION)} 
+            className="group relative bg-gray-900 border border-gray-800 hover:border-blue-500/50 rounded-[3rem] p-12 transition-all hover:-translate-y-3 shadow-2xl flex flex-col items-start overflow-hidden"
           >
-            <div className="absolute inset-0 bg-blue-500/10 rounded-3xl opacity-0 group-hover:opacity-100 transition-opacity"></div>
-            <div className="flex flex-col items-center gap-4">
-              <div className="w-20 h-20 rounded-full bg-gray-800 flex items-center justify-center text-3xl text-blue-400">
-                <i className="fas fa-mobile-alt"></i>
-              </div>
-              <h2 className="text-2xl font-bold text-white">Companion Mode</h2>
-              <p className="text-gray-400 text-center text-sm">
-                Smartphone/Desktop dashboard. Visualizes data, manages contacts, and runs Gemini AI analysis.
-              </p>
-            </div>
+             <div className="absolute top-0 right-0 p-8 opacity-5 group-hover:opacity-20 transition-opacity">
+               <i className="fas fa-server text-9xl"></i>
+             </div>
+             <div className="w-16 h-16 rounded-3xl bg-blue-500/10 flex items-center justify-center text-3xl text-blue-400 mb-8">
+               <i className="fas fa-terminal"></i>
+             </div>
+             <h3 className="text-3xl font-black uppercase mb-3 tracking-tighter">Guardian Hub</h3>
+             <p className="text-gray-500 text-lg leading-relaxed text-left font-medium">Central command interface. Manage multiple patients with agentic trend analysis via Gemini 3 Pro.</p>
           </button>
         </div>
-        
-        <div className="mt-12 text-gray-600 text-sm">
-           <i className="fas fa-info-circle mr-2"></i> 
-           Open this URL in two separate tabs/windows to test real-time syncing.
+
+        <div className="mt-20 flex items-center gap-6 px-8 py-4 bg-gray-900/40 rounded-full border border-gray-800 text-[10px] text-gray-600 font-black uppercase tracking-widest shadow-inner">
+           <div className="flex items-center gap-2">
+              <div className="w-2 h-2 rounded-full bg-cyan-500 animate-ping"></div>
+              <span>Network Active</span>
+           </div>
+           <div className="w-px h-4 bg-gray-800"></div>
+           <span>API Key: {process.env.API_KEY ? 'DETECTED' : 'MISSING'}</span>
         </div>
       </div>
     );
@@ -229,25 +235,36 @@ const App: React.FC = () => {
   if (mode === AppMode.WEARABLE) {
     return (
       <WearableInterface 
-        currentVitals={vitals}
-        onToggleSleep={handleToggleSleep}
-        onSimulateAnomaly={handleSimulateAnomaly}
+        currentPatient={currentPatient}
+        onToggleSleep={() => {
+          setPatients(prev => prev.map(p => p.id === activePatientId ? { ...p, vitals: { ...p.vitals, isSleeping: !p.vitals.isSleeping } } : p));
+        }}
+        onToggleScan={() => {
+           setPatients(prev => prev.map(p => p.id === activePatientId ? { ...p, vitals: { ...p.vitals, isScanning: !p.vitals.isScanning } } : p));
+        }}
+        onSimulateAnomaly={() => {
+          setPatients(prev => prev.map(p => p.id === activePatientId ? { ...p, vitals: { ...p.vitals, heartRate: 158, spo2: 89, stressLevel: 98, systolic: 195, diastolic: 115, accelerometer: { x: 25.4, y: -12.1, z: 2.3 } } } : p));
+        }}
         isEmergency={isEmergency}
-        onCancelEmergency={handleCancelEmergency}
+        onCancelEmergency={() => { 
+          setIsEmergency(false); 
+          broadcast('SOS_TRIGGER', false); 
+          setPatients(prev => prev.map(p => p.id === activePatientId ? { ...p, vitals: { ...p.vitals, heartRate: 72, spo2: 98, stressLevel: 15, systolic: 125, diastolic: 82, accelerometer: { x: 0, y: 0.2, z: 9.8 } } } : p));
+        }}
+        onTriggerSOS={() => { setIsEmergency(true); broadcast('SOS_TRIGGER', true); }}
       />
     );
   }
 
   return (
     <CompanionDashboard 
-       vitalsHistory={history}
-       currentVitals={vitals}
-       analysis={analysis}
-       emergencyContacts={emergencyContacts}
-       onAddContact={handleAddContact}
-       onRemoveContact={handleRemoveContact}
-       isAnalysing={isAnalysing}
-       onTriggerAnalysis={handleTriggerAnalysis}
+      patients={patients}
+      activePatientId={activePatientId}
+      onSwitchPatient={setActivePatientId}
+      onAddPatient={handleAddPatient}
+      devices={devices}
+      onTriggerAnalysis={handleTriggerAnalysis}
+      isAnalysing={isAnalysing}
     />
   );
 };

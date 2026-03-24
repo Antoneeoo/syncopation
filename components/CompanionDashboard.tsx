@@ -1,315 +1,322 @@
+
 import React, { useState } from 'react';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area, ReferenceLine } from 'recharts';
-import { VitalSigns, HealthAnalysis, EmergencyContact } from '../types';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts';
+import { Patient, HealthAnalysis, DeviceConnection } from '../types';
 
 interface CompanionProps {
-  vitalsHistory: VitalSigns[];
-  currentVitals: VitalSigns;
-  analysis: HealthAnalysis | null;
-  emergencyContacts: EmergencyContact[];
-  onAddContact: (contact: EmergencyContact) => void;
-  onRemoveContact: (id: string) => void;
-  isAnalysing: boolean;
+  patients: Patient[];
+  activePatientId: string;
+  onSwitchPatient: (id: string) => void;
+  onAddPatient: (patient: Patient) => void;
+  devices: DeviceConnection[];
   onTriggerAnalysis: () => void;
+  isAnalysing: boolean;
 }
 
 const CompanionDashboard: React.FC<CompanionProps> = ({
-  vitalsHistory,
-  currentVitals,
-  analysis,
-  emergencyContacts,
-  onAddContact,
-  onRemoveContact,
-  isAnalysing,
-  onTriggerAnalysis
+  patients,
+  activePatientId,
+  onSwitchPatient,
+  onAddPatient,
+  devices,
+  onTriggerAnalysis,
+  isAnalysing
 }) => {
-  const [activeTab, setActiveTab] = useState<'DASHBOARD' | 'SETTINGS'>('DASHBOARD');
-  const [newContactName, setNewContactName] = useState('');
-  const [newContactPhone, setNewContactPhone] = useState('');
+  const [activeTab, setActiveTab] = useState<'DASHBOARD' | 'PATIENTS' | 'NETWORK' | 'LOGS'>('DASHBOARD');
+  const [isAddingPatient, setIsAddingPatient] = useState(false);
+  const [newPatientName, setNewPatientName] = useState('');
 
-  const handleAddContact = () => {
-    if (newContactName && newContactPhone) {
-      onAddContact({
-        id: Date.now().toString(),
-        name: newContactName,
-        phone: newContactPhone,
-        isAutoDial: true
-      });
-      setNewContactName('');
-      setNewContactPhone('');
-    }
-  };
+  const patient = patients.find(p => p.id === activePatientId) || patients[0];
 
-  // Format data for Recharts
-  const chartData = vitalsHistory.slice(-50).map((v) => ({
+  const chartData = patient.history.slice(-60).map((v) => ({
     time: new Date(v.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
     heartRate: v.heartRate,
     spo2: v.spo2,
-    stress: v.stressLevel,
-    systolic: v.systolic,
-    diastolic: v.diastolic,
-    temperature: v.temperature
+    temp: v.temperature.toFixed(1)
   }));
 
+  const exportCSV = () => {
+    const header = "Timestamp,HeartRate,SpO2,Temperature,BloodPressure\n";
+    const body = patient.history.map(h => `${new Date(h.timestamp).toISOString()},${h.heartRate},${h.spo2},${h.temperature},${h.systolic}/${h.diastolic}`).join("\n");
+    const blob = new Blob([header + body], { type: 'text/csv' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `VITALSYNC_REPORT_${patient.name.toUpperCase()}_${Date.now()}.csv`;
+    a.click();
+  };
+
+  const addNewPatient = () => {
+    if (!newPatientName) return;
+    const newP: Patient = {
+      id: `p${Date.now()}`,
+      name: newPatientName,
+      age: 30,
+      gender: 'Undisclosed',
+      bloodType: 'Unknown',
+      vitals: patient.vitals,
+      history: [],
+      analysis: null
+    };
+    onAddPatient(newP);
+    setNewPatientName('');
+    setIsAddingPatient(false);
+  };
+
   return (
-    <div className="flex h-screen bg-gray-950 text-gray-100 overflow-hidden font-sans">
-      
-      {/* Sidebar */}
-      <aside className="w-64 bg-gray-900 border-r border-gray-800 hidden md:flex flex-col">
-        <div className="p-6 border-b border-gray-800">
-          <h1 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-cyan-400 to-blue-500">
-            VitalSync AI
-          </h1>
-          <p className="text-xs text-gray-500 mt-1">Companion Dashboard</p>
-        </div>
-        <nav className="flex-1 p-4 space-y-2">
-          <button 
-            onClick={() => setActiveTab('DASHBOARD')}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${activeTab === 'DASHBOARD' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/50' : 'text-gray-400 hover:bg-gray-800'}`}
-          >
-            <i className="fas fa-chart-line"></i> Dashboard
-          </button>
-          <button 
-             onClick={() => setActiveTab('SETTINGS')}
-             className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${activeTab === 'SETTINGS' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/50' : 'text-gray-400 hover:bg-gray-800'}`}
-          >
-            <i className="fas fa-cog"></i> Settings
-          </button>
-        </nav>
-        <div className="p-4 border-t border-gray-800">
-          <div className="flex items-center gap-3">
-             <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
-             <span className="text-sm text-gray-400">Wearable Connected</span>
+    <div className="flex h-screen bg-gray-950 text-gray-100 font-sans overflow-hidden">
+      {/* Dynamic Sidebar */}
+      <aside className="w-80 bg-gray-900 border-r border-gray-800 flex flex-col z-20">
+        <div className="p-8 pb-10">
+          <div className="flex items-center gap-4 group cursor-pointer">
+            <div className="w-12 h-12 bg-gradient-to-br from-cyan-400 to-blue-600 rounded-2xl flex items-center justify-center text-white shadow-[0_0_20px_rgba(6,182,212,0.3)] group-hover:scale-105 transition-transform">
+              <i className="fas fa-shield-heart text-2xl"></i>
+            </div>
+            <div>
+              <h1 className="text-2xl font-black tracking-tighter leading-none mb-1">VITALSYNC</h1>
+              <div className="flex items-center gap-2">
+                <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span>
+                <span className="text-[10px] text-gray-500 font-black uppercase tracking-widest">Enterprise Mesh</span>
+              </div>
+            </div>
           </div>
+        </div>
+
+        <nav className="flex-1 px-4 space-y-1 overflow-y-auto">
+          {[
+            { id: 'DASHBOARD', icon: 'fa-cubes-stacked', label: 'Command Hub' },
+            { id: 'PATIENTS', icon: 'fa-address-book', label: 'Patient Mesh' },
+            { id: 'NETWORK', icon: 'fa-satellite-dish', label: 'Network Nodes' },
+            { id: 'LOGS', icon: 'fa-brain', label: 'Agent Intelligence' }
+          ].map(tab => (
+            <button 
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id as any)}
+              className={`w-full flex items-center gap-4 px-6 py-5 rounded-3xl transition-all font-bold text-sm ${activeTab === tab.id ? 'bg-blue-600 text-white shadow-xl shadow-blue-900/40' : 'text-gray-500 hover:bg-white/5'}`}
+            >
+              <i className={`fas ${tab.icon} w-5 text-lg`}></i> {tab.label}
+            </button>
+          ))}
+        </nav>
+
+        <div className="p-6">
+           <div className="bg-black/40 p-5 rounded-3xl border border-gray-800 flex items-center gap-4">
+              <div className="relative">
+                <div className="w-12 h-12 rounded-2xl bg-gray-800 flex items-center justify-center text-gray-600 text-xl border border-gray-700">
+                  <i className="fas fa-id-card-clip"></i>
+                </div>
+                <div className="absolute -top-1 -right-1 w-3 h-3 rounded-full bg-green-500 border-2 border-gray-900"></div>
+              </div>
+              <div className="flex-1 overflow-hidden">
+                <div className="text-sm font-black truncate">{patient.name}</div>
+                <div className="text-[9px] text-gray-600 font-bold uppercase tracking-widest">Agent Active</div>
+              </div>
+           </div>
         </div>
       </aside>
 
-      {/* Main Content */}
-      <main className="flex-1 overflow-y-auto p-4 md:p-8 relative">
-        {activeTab === 'DASHBOARD' && (
-          <div className="space-y-6 max-w-7xl mx-auto">
-            {/* Top Stats Cards */}
-            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-              <div className="bg-gray-900 p-4 rounded-2xl border border-gray-800">
-                <div className="text-gray-400 text-xs mb-1">Heart Rate</div>
-                <div className="text-2xl font-bold text-red-500">{currentVitals.heartRate} <span className="text-xs text-gray-500">bpm</span></div>
-              </div>
-              <div className="bg-gray-900 p-4 rounded-2xl border border-gray-800">
-                <div className="text-gray-400 text-xs mb-1">Blood Pressure</div>
-                <div className="text-2xl font-bold text-pink-400">{currentVitals.systolic}/{currentVitals.diastolic}</div>
-              </div>
-              <div className="bg-gray-900 p-4 rounded-2xl border border-gray-800">
-                <div className="text-gray-400 text-xs mb-1">Temperature</div>
-                <div className="text-2xl font-bold text-orange-400">{currentVitals.temperature.toFixed(1)}°C</div>
-              </div>
-              <div className="bg-gray-900 p-4 rounded-2xl border border-gray-800">
-                <div className="text-gray-400 text-xs mb-1">Blood Oxygen</div>
-                <div className="text-2xl font-bold text-blue-400">{currentVitals.spo2}%</div>
-              </div>
-              <div className="bg-gray-900 p-4 rounded-2xl border border-gray-800">
-                <div className="text-gray-400 text-xs mb-1">Stress Level</div>
-                <div className="text-2xl font-bold text-purple-400">{currentVitals.stressLevel} <span className="text-xs text-gray-500">/100</span></div>
-              </div>
-              <div className="bg-gray-900 p-4 rounded-2xl border border-gray-800">
-                <div className="text-gray-400 text-xs mb-1">Steps</div>
-                <div className="text-2xl font-bold text-emerald-400">{currentVitals.steps}</div>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              {/* Charts Section */}
-              <div className="lg:col-span-2 space-y-6">
-                
-                {/* Chart 1: HR & SpO2 */}
-                <div className="bg-gray-900 p-6 rounded-2xl border border-gray-800 shadow-xl">
-                  <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
-                    <i className="fas fa-heartbeat text-red-500"></i> Heart Rate & SpO2
-                  </h3>
-                  <div className="h-56">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <AreaChart data={chartData}>
-                        <defs>
-                          <linearGradient id="colorHr" x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="5%" stopColor="#ef4444" stopOpacity={0.3}/>
-                            <stop offset="95%" stopColor="#ef4444" stopOpacity={0}/>
-                          </linearGradient>
-                        </defs>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#374151" vertical={false} />
-                        <XAxis dataKey="time" stroke="#9ca3af" tick={{fontSize: 10}} minTickGap={30} />
-                        <YAxis stroke="#9ca3af" domain={[40, 160]} tick={{fontSize: 10}} />
-                        <Tooltip 
-                          contentStyle={{backgroundColor: '#1f2937', borderColor: '#374151', color: '#fff'}}
-                          itemStyle={{color: '#fff'}}
-                        />
-                        <Area type="monotone" dataKey="heartRate" stroke="#ef4444" strokeWidth={2} fillOpacity={1} fill="url(#colorHr)" name="HR (bpm)" />
-                        <Line type="monotone" dataKey="spo2" stroke="#3b82f6" strokeWidth={2} dot={false} name="SpO2 (%)" />
-                      </AreaChart>
-                    </ResponsiveContainer>
-                  </div>
-                </div>
-
-                {/* Chart 2: Hemodynamics & Temp */}
-                <div className="bg-gray-900 p-6 rounded-2xl border border-gray-800 shadow-xl">
-                  <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
-                    <i className="fas fa-activity text-pink-500"></i> Hemodynamics & Temperature
-                  </h3>
-                   <div className="h-56">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <LineChart data={chartData}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#374151" vertical={false} />
-                        <XAxis dataKey="time" stroke="#9ca3af" tick={{fontSize: 10}} minTickGap={30} />
-                        <YAxis yAxisId="left" stroke="#ec4899" domain={[40, 200]} tick={{fontSize: 10}} label={{ value: 'mmHg', angle: -90, position: 'insideLeft', fill: '#ec4899' }} />
-                        <YAxis yAxisId="right" orientation="right" stroke="#f97316" domain={[35, 42]} tick={{fontSize: 10}} label={{ value: '°C', angle: 90, position: 'insideRight', fill: '#f97316' }} />
-                        <Tooltip contentStyle={{backgroundColor: '#1f2937', borderColor: '#374151'}} />
-                        <Line yAxisId="left" type="monotone" dataKey="systolic" stroke="#ec4899" strokeWidth={2} dot={false} name="Systolic" />
-                        <Line yAxisId="left" type="monotone" dataKey="diastolic" stroke="#db2777" strokeWidth={2} strokeDasharray="5 5" dot={false} name="Diastolic" />
-                        <Line yAxisId="right" type="monotone" dataKey="temperature" stroke="#f97316" strokeWidth={2} dot={false} name="Temp (°C)" />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </div>
-                </div>
-              </div>
-
-              {/* AI Analysis Panel */}
-              <div className="lg:col-span-1 flex flex-col gap-6">
-                <div className="bg-gray-800/50 backdrop-blur-xl border border-gray-700 rounded-3xl p-6 h-full flex flex-col">
-                  <div className="flex justify-between items-center mb-6">
-                    <h3 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-400">
-                      Gemini Health AI
-                    </h3>
-                    <button 
-                      onClick={onTriggerAnalysis}
-                      disabled={isAnalysing}
-                      className="text-sm bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white px-4 py-2 rounded-lg transition-colors flex items-center gap-2"
-                    >
-                      {isAnalysing ? <i className="fas fa-circle-notch fa-spin"></i> : <i className="fas fa-magic"></i>}
-                      Analyze
-                    </button>
-                  </div>
-
-                  {!analysis ? (
-                    <div className="flex-1 flex flex-col items-center justify-center text-gray-500 text-center space-y-4">
-                       <div className="w-20 h-20 rounded-full bg-gray-800 flex items-center justify-center animate-pulse">
-                         <i className="fas fa-user-md text-4xl text-gray-600"></i>
-                       </div>
-                       <div>
-                         <p className="text-lg font-semibold text-gray-400">Ready for Analysis</p>
-                         <p className="text-sm">Click "Analyze" to process vitals, detect anomalies, and generate health insights using Gemini.</p>
-                       </div>
-                    </div>
-                  ) : (
-                    <div className="space-y-4 animate-fade-in flex-1 overflow-y-auto pr-1">
-                       <div className={`p-4 rounded-xl border flex items-center gap-3 ${
-                         analysis.status === 'CRITICAL' ? 'bg-red-900/30 border-red-500/50 text-red-200' :
-                         analysis.status === 'WARNING' ? 'bg-yellow-900/30 border-yellow-500/50 text-yellow-200' :
-                         'bg-green-900/30 border-green-500/50 text-green-200'
-                       }`}>
-                          <i className={`text-2xl fas ${analysis.status === 'NORMAL' ? 'fa-check-circle' : 'fa-exclamation-triangle'}`}></i>
-                          <div>
-                            <div className="text-xs opacity-70 font-bold uppercase tracking-wider">Health Status</div>
-                            <div className="font-bold text-lg">{analysis.status}</div>
-                          </div>
-                       </div>
-                       
-                       <div className="bg-gray-900/50 p-4 rounded-xl border border-gray-700/50">
-                          <p className="text-gray-300 text-sm leading-relaxed">{analysis.summary}</p>
-                       </div>
-
-                       {analysis.anomaliesDetected.length > 0 ? (
-                         <div className="bg-red-900/10 p-4 rounded-xl border border-red-900/30">
-                           <div className="flex items-center gap-2 mb-3">
-                             <i className="fas fa-bolt text-red-500"></i>
-                             <span className="text-xs text-red-400 font-bold uppercase tracking-wide">Detected Anomalies</span>
-                           </div>
-                           <ul className="space-y-2">
-                             {analysis.anomaliesDetected.map((a, i) => (
-                               <li key={i} className="flex items-start gap-3 text-sm text-red-200 bg-red-900/20 p-2 rounded-lg">
-                                 <i className="fas fa-exclamation-circle mt-1 text-xs text-red-400"></i>
-                                 <span>{a}</span>
-                               </li>
-                             ))}
-                           </ul>
-                         </div>
-                       ) : (
-                          <div className="flex items-center gap-2 text-green-500/50 text-sm px-2">
-                            <i className="fas fa-shield-alt"></i> No anomalies detected.
-                          </div>
-                       )}
-                       
-                       <div className="mt-4 pt-4 border-t border-gray-700">
-                          <span className="text-xs text-blue-400 font-bold uppercase flex items-center gap-2">
-                            <i className="fas fa-lightbulb"></i> Recommendation
-                          </span>
-                          <p className="text-white text-sm mt-2 italic border-l-2 border-blue-500 pl-3">{analysis.recommendation}</p>
-                       </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
+      {/* Main Viewport */}
+      <main className="flex-1 overflow-y-auto relative bg-[radial-gradient(circle_at_top_left,rgba(6,182,212,0.05),transparent)]">
+        <header className="sticky top-0 z-10 bg-gray-950/80 backdrop-blur-3xl border-b border-gray-800 px-10 py-8 flex justify-between items-center">
+          <div>
+            <div className="text-[10px] font-black text-cyan-500 uppercase tracking-[0.3em] mb-1">System View</div>
+            <h2 className="text-3xl font-black uppercase tracking-tighter leading-none">{activeTab.replace('_', ' ')}</h2>
           </div>
-        )}
+          <div className="flex gap-4">
+            <button onClick={exportCSV} className="px-6 py-3 bg-gray-800 hover:bg-gray-700 rounded-2xl text-xs font-black transition-all border border-gray-700 uppercase tracking-widest">
+              <i className="fas fa-file-csv mr-2"></i> Report
+            </button>
+            <button 
+              onClick={onTriggerAnalysis} 
+              disabled={isAnalysing} 
+              className="px-8 py-3 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 rounded-2xl text-xs font-black transition-all shadow-xl shadow-cyan-900/30 uppercase tracking-widest flex items-center gap-2"
+            >
+              {isAnalysing ? <i className="fas fa-circle-notch fa-spin"></i> : <i className="fas fa-atom"></i>}
+              Deep Scan
+            </button>
+          </div>
+        </header>
 
-        {activeTab === 'SETTINGS' && (
-           <div className="max-w-2xl mx-auto bg-gray-900 rounded-2xl border border-gray-800 p-8">
-              <h2 className="text-2xl font-bold mb-6">Emergency Configuration</h2>
-              
-              <div className="mb-8">
-                <h3 className="text-lg font-semibold mb-4 text-gray-300">Registered Contacts</h3>
-                {emergencyContacts.length === 0 ? (
-                  <p className="text-gray-500 italic">No contacts set up.</p>
-                ) : (
-                  <ul className="space-y-3">
-                    {emergencyContacts.map(contact => (
-                      <li key={contact.id} className="flex items-center justify-between bg-gray-800 p-4 rounded-xl border border-gray-700">
-                        <div className="flex items-center gap-4">
-                           <div className="w-10 h-10 rounded-full bg-blue-900/50 flex items-center justify-center text-blue-400 font-bold">
-                             {contact.name.charAt(0)}
-                           </div>
-                           <div>
-                             <div className="font-bold">{contact.name}</div>
-                             <div className="text-sm text-gray-400">{contact.phone}</div>
-                           </div>
-                        </div>
-                        <button 
-                          onClick={() => onRemoveContact(contact.id)}
-                          className="text-red-400 hover:text-red-300 transition-colors"
-                        >
-                          <i className="fas fa-trash"></i>
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                )}
+        <div className="p-10 max-w-7xl mx-auto">
+          {activeTab === 'DASHBOARD' && (
+            <div className="space-y-10">
+              {/* Vitals Summary Grid */}
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-8">
+                {[
+                  { label: 'Heart Rate', val: patient.vitals.heartRate, unit: 'BPM', color: 'text-red-500', bg: 'bg-red-500/5', icon: 'fa-heartbeat' },
+                  { label: 'Oxygen SpO2', val: patient.vitals.spo2, unit: '%', color: 'text-blue-400', bg: 'bg-blue-400/5', icon: 'fa-lungs' },
+                  { label: 'Pressure (S/D)', val: `${patient.vitals.systolic}/${patient.vitals.diastolic}`, unit: 'mmHg', color: 'text-pink-400', bg: 'bg-pink-400/5', icon: 'fa-gauge-high' },
+                  { label: 'Core Temp', val: patient.vitals.temperature.toFixed(1), unit: '°C', color: 'text-orange-400', bg: 'bg-orange-400/5', icon: 'fa-thermometer-half' },
+                ].map((stat, i) => (
+                  <div key={i} className={`p-8 rounded-[2.5rem] border border-gray-800 transition-all hover:scale-[1.02] shadow-sm flex flex-col items-center text-center ${stat.bg}`}>
+                    <div className="w-12 h-12 rounded-2xl bg-gray-900 border border-gray-800 flex items-center justify-center mb-6">
+                      <i className={`fas ${stat.icon} ${stat.color} text-xl`}></i>
+                    </div>
+                    <div className="text-gray-500 text-[10px] font-black uppercase tracking-widest mb-2">{stat.label}</div>
+                    <div className={`text-5xl font-black ${stat.color} tracking-tighter`}>
+                      {stat.val} <span className="text-sm font-bold text-gray-700 ml-1">{stat.unit}</span>
+                    </div>
+                  </div>
+                ))}
               </div>
 
-              <div className="bg-gray-800/50 p-6 rounded-xl border border-gray-700">
-                <h3 className="text-md font-bold mb-4 text-white">Add New Contact</h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+              {/* Main Telemetry Visuals */}
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-10">
+                <div className="lg:col-span-2 space-y-10">
+                  <div className="bg-gray-900/30 p-10 rounded-[3rem] border border-gray-800 shadow-2xl">
+                    <div className="flex justify-between items-center mb-10">
+                      <h3 className="text-lg font-black uppercase tracking-tighter flex items-center gap-3">
+                        <div className="w-3 h-3 rounded-full bg-red-500 animate-pulse"></div> Live Cardiac Stream
+                      </h3>
+                      <div className="text-[10px] text-gray-600 font-black uppercase tracking-widest">Auto-sampling: 1.5s</div>
+                    </div>
+                    <div className="h-[350px]">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <AreaChart data={chartData}>
+                          <defs>
+                            <linearGradient id="colorHr" x1="0" y1="0" x2="0" y2="1">
+                              <stop offset="5%" stopColor="#ef4444" stopOpacity={0.15}/>
+                              <stop offset="95%" stopColor="#ef4444" stopOpacity={0}/>
+                            </linearGradient>
+                          </defs>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" vertical={false} opacity={0.3} />
+                          <XAxis dataKey="time" stroke="#4b5563" tick={{fontSize: 9}} hide={true} />
+                          <YAxis stroke="#4b5563" tick={{fontSize: 10}} domain={['dataMin - 10', 'dataMax + 10']} />
+                          <Tooltip contentStyle={{backgroundColor: '#0d1117', border: '1px solid #1f2937', borderRadius: '20px'}} />
+                          <Area type="monotone" dataKey="heartRate" stroke="#ef4444" strokeWidth={4} fillOpacity={1} fill="url(#colorHr)" animationDuration={300} />
+                        </AreaChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="lg:col-span-1">
+                  <div className="bg-gray-900 p-10 rounded-[3rem] border border-gray-800 h-full flex flex-col shadow-2xl relative overflow-hidden">
+                    <div className="absolute top-0 right-0 p-8 opacity-5">
+                      <i className="fas fa-robot text-8xl"></i>
+                    </div>
+                    <h3 className="text-lg font-black uppercase tracking-tighter mb-8 flex items-center gap-3">
+                      <i className="fas fa-brain text-cyan-400"></i> Guardian Logic
+                    </h3>
+                    <div className="flex-1 space-y-6 overflow-y-auto pr-4 custom-scrollbar">
+                      {patient.analysis?.agentActions?.map((action, i) => (
+                        <div key={i} className="flex gap-5 group items-start">
+                          <div className="flex flex-col items-center">
+                            <div className="w-2.5 h-2.5 rounded-full bg-cyan-500 shadow-[0_0_10px_cyan] mt-1.5 ring-4 ring-cyan-500/10"></div>
+                            <div className="w-px h-12 bg-gradient-to-b from-cyan-500/50 to-transparent my-1"></div>
+                          </div>
+                          <div className="bg-gray-800/20 p-4 rounded-2xl border border-gray-800 group-hover:bg-cyan-500/5 transition-colors">
+                            <div className="text-[10px] text-gray-600 font-black uppercase mb-1">{new Date().toLocaleTimeString()}</div>
+                            <p className="text-xs text-gray-300 font-bold leading-relaxed">{action}</p>
+                          </div>
+                        </div>
+                      ))}
+                      {(!patient.analysis?.agentActions || patient.analysis.agentActions.length === 0) && (
+                        <div className="flex-1 flex flex-col items-center justify-center text-center py-20 opacity-20">
+                           <i className="fas fa-wave-square text-4xl mb-4"></i>
+                           <p className="text-xs font-black uppercase tracking-widest">Awaiting Biometric Data</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'PATIENTS' && (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+              {patients.map(p => (
+                <div 
+                  key={p.id} 
+                  onClick={() => onSwitchPatient(p.id)}
+                  className={`p-10 rounded-[3rem] border cursor-pointer transition-all hover:translate-y-[-5px] ${activePatientId === p.id ? 'bg-blue-600/10 border-blue-500 shadow-2xl' : 'bg-gray-900/40 border-gray-800'}`}
+                >
+                  <div className="flex items-center gap-6 mb-8">
+                    <div className={`w-16 h-16 rounded-2xl flex items-center justify-center text-2xl border ${activePatientId === p.id ? 'bg-blue-500 text-white border-blue-400' : 'bg-gray-800 text-gray-500 border-gray-700'}`}>
+                      <i className="fas fa-user-shield"></i>
+                    </div>
+                    <div>
+                      <h4 className="font-black text-xl tracking-tighter">{p.name}</h4>
+                      <p className="text-[10px] text-gray-600 font-black uppercase tracking-widest">{p.gender}, {p.age}y • {p.bloodType}</p>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4 border-t border-gray-800 pt-6">
+                    <div>
+                      <div className="text-[9px] text-gray-600 font-black uppercase tracking-widest mb-1">Status</div>
+                      <div className={`text-xs font-black ${p.vitals.heartRate > 110 ? 'text-red-500' : 'text-green-500'}`}>
+                        {p.vitals.heartRate > 110 ? 'ATTENTION REQ.' : 'STABLE'}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[9px] text-gray-600 font-black uppercase tracking-widest mb-1">HR AVG</div>
+                      <div className="text-xs font-black">{p.vitals.heartRate} BPM</div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+              
+              {!isAddingPatient ? (
+                <button 
+                  onClick={() => setIsAddingPatient(true)}
+                  className="p-10 rounded-[3rem] border-2 border-dashed border-gray-800 hover:border-blue-500/50 hover:bg-blue-500/5 transition-all flex flex-col items-center justify-center text-gray-700 group h-full min-h-[220px]"
+                >
+                  <i className="fas fa-plus-circle text-4xl mb-4 group-hover:scale-110 transition-transform"></i>
+                  <span className="text-xs font-black uppercase tracking-widest">Enroll New Node</span>
+                </button>
+              ) : (
+                <div className="p-10 rounded-[3rem] border-2 border-blue-500 bg-gray-900 shadow-2xl flex flex-col gap-4">
+                  <h4 className="text-sm font-black uppercase tracking-widest text-blue-400">Add New Patient</h4>
                   <input 
                     type="text" 
-                    placeholder="Name" 
-                    value={newContactName}
-                    onChange={(e) => setNewContactName(e.target.value)}
-                    className="bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-blue-500"
+                    placeholder="ENTER NAME" 
+                    value={newPatientName}
+                    onChange={(e) => setNewPatientName(e.target.value)}
+                    className="w-full bg-gray-950 border border-gray-800 rounded-2xl px-6 py-4 text-xs font-black uppercase tracking-widest focus:outline-none focus:border-blue-500"
                   />
-                  <input 
-                    type="tel" 
-                    placeholder="Phone Number" 
-                    value={newContactPhone}
-                    onChange={(e) => setNewContactPhone(e.target.value)}
-                    className="bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-blue-500"
-                  />
+                  <div className="flex gap-2">
+                    <button onClick={addNewPatient} className="flex-1 bg-blue-600 py-4 rounded-2xl font-black text-[10px] uppercase tracking-widest">Enroll</button>
+                    <button onClick={() => setIsAddingPatient(false)} className="px-6 py-4 rounded-2xl font-black text-[10px] bg-gray-800 uppercase tracking-widest">Cancel</button>
+                  </div>
                 </div>
-                <button 
-                  onClick={handleAddContact}
-                  className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded-lg transition-colors"
-                >
-                  Add Contact
-                </button>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'NETWORK' && (
+            <div className="space-y-10">
+              <div className="bg-gray-900/50 p-12 rounded-[3rem] border border-gray-800 shadow-xl">
+                <div className="flex justify-between items-center mb-10">
+                  <h3 className="text-2xl font-black tracking-tighter uppercase">Device Mesh Topology</h3>
+                  <div className="flex gap-4">
+                    <span className="flex items-center gap-2 text-[10px] text-gray-500 font-black uppercase tracking-widest">
+                       <i className="fas fa-circle text-cyan-500"></i> Active Nodes
+                    </span>
+                    <button className="text-[10px] font-black text-cyan-500 hover:text-cyan-400 transition-colors uppercase tracking-widest underline decoration-2 underline-offset-4">Rescan Network</button>
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {devices.map(d => (
+                    <div key={d.id} className="bg-black/40 p-8 rounded-[2.5rem] border border-gray-800 flex items-center justify-between group transition-all hover:bg-white/5">
+                      <div className="flex items-center gap-6">
+                        <div className={`w-16 h-16 rounded-2xl flex items-center justify-center text-2xl ${d.status === 'CONNECTED' ? 'bg-cyan-500/10 text-cyan-500' : 'bg-gray-800 text-gray-500'}`}>
+                          <i className={`fas ${d.type === 'WATCH' ? 'fa-clock-rotate-left' : 'fa-sensor'}`}></i>
+                        </div>
+                        <div>
+                          <div className="font-black text-lg tracking-tighter">{d.name}</div>
+                          <div className="text-[10px] text-gray-600 font-black uppercase tracking-widest">{d.status} • {d.battery}% BATT</div>
+                        </div>
+                      </div>
+                      {d.status === 'CONNECTED' && (
+                        <div className="w-3 h-3 rounded-full bg-cyan-500 shadow-[0_0_15px_rgba(6,182,212,0.8)]"></div>
+                      )}
+                    </div>
+                  ))}
+                </div>
               </div>
-           </div>
-        )}
+            </div>
+          )}
+        </div>
       </main>
     </div>
   );
