@@ -1,11 +1,8 @@
-
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { AppMode, VitalSigns, Patient, EmergencyContact, SyncMessage, DeviceConnection } from './types';
+import React, { useState, useEffect, useCallback } from 'react';
+import { AppMode, VitalSigns, Patient, DeviceConnection } from './types';
 import WearableInterface from './components/WearableInterface';
 import CompanionDashboard from './components/CompanionDashboard';
 import { analyzePatientHealth, detectFalls } from './services/geminiService';
-
-const BROADCAST_CHANNEL_NAME = 'vitalsync_enterprise_mesh';
 
 const DEFAULT_PATIENTS: Patient[] = [
   {
@@ -44,137 +41,347 @@ const App: React.FC = () => {
   const [isAnalysing, setIsAnalysing] = useState(false);
   const [devices, setDevices] = useState<DeviceConnection[]>(MOCK_DEVICES);
 
-  const channelRef = useRef<BroadcastChannel | null>(null);
+  // BLE Pairing States
+  const [bleStatus, setBleStatus] = useState<'DISCONNECTED' | 'SEARCHING' | 'CONNECTING' | 'CONNECTED'>('DISCONNECTED');
+  const [bleDeviceName, setBleDeviceName] = useState<string>('');
 
-  // Synchronization initialization
+  // 1. BACKEND STATE SYNCHRONIZATION (Polling loop)
   useEffect(() => {
-    channelRef.current = new BroadcastChannel(BROADCAST_CHANNEL_NAME);
-    channelRef.current.onmessage = (event) => {
-      const msg: SyncMessage = event.data;
-      if (msg.type === 'PATIENT_UPDATE') {
-        setPatients(prev => prev.map(p => p.id === msg.payload.id ? msg.payload : p));
-      } else if (msg.type === 'SOS_TRIGGER') {
-        setIsEmergency(msg.payload);
-      } else if (msg.type === 'DEVICE_UPDATE') {
-        setDevices(msg.payload);
+    const fetchState = async () => {
+      try {
+        const res = await fetch('/api/patients');
+        if (res.ok) {
+          const data = await res.json();
+          if (data.patients && data.patients.length > 0) {
+            setPatients(data.patients);
+          }
+          if (data.devices && data.devices.length > 0) {
+            setDevices(data.devices);
+          }
+          setIsEmergency(data.isEmergency);
+        }
+      } catch (err) {
+        console.warn('Backend server not responsive yet. Defaulting to local state simulation.', err);
       }
     };
-    return () => channelRef.current?.close();
+
+    fetchState();
+    const interval = setInterval(fetchState, 1500);
+    return () => clearInterval(interval);
   }, []);
 
-  const broadcast = useCallback((type: SyncMessage['type'], payload: any) => {
-    channelRef.current?.postMessage({ type, payload });
-  }, []);
-
-  const handleTriggerAnalysis = async () => {
+  // 2. AUTOMATIC GUARDIAN LOOP: Autonomously monitor the active patient for abnormalities
+  const handleTriggerAnalysis = useCallback(async () => {
     const activePatient = patients.find(p => p.id === activePatientId);
     if (!activePatient || isAnalysing) return;
 
     setIsAnalysing(true);
     const result = await analyzePatientHealth(activePatient);
     
-    setPatients(prev => prev.map(p => {
-      if (p.id !== activePatientId) return p;
-      const updated = { ...p, analysis: result };
-      broadcast('PATIENT_UPDATE', updated);
-      return updated;
-    }));
-    setIsAnalysing(false);
-  };
+    try {
+      const res = await fetch('/api/patients/analysis', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          patientId: activePatientId,
+          analysis: result
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.patient) {
+          setPatients(prev => prev.map(p => p.id === activePatientId ? data.patient : p));
+        }
+      }
+    } catch (err) {
+      // Fallback local update
+      setPatients(prev => prev.map(p => {
+        if (p.id !== activePatientId) return p;
+        return { ...p, analysis: result };
+      }));
+    } finally {
+      setIsAnalysing(false);
+    }
+  }, [patients, activePatientId, isAnalysing]);
 
-  // AUTOMATIC GUARDIAN LOOP: Autonomously monitor the active patient
   useEffect(() => {
     const activePatient = patients.find(p => p.id === activePatientId);
     if (!activePatient || isAnalysing || mode === AppMode.SELECT) return;
 
     const v = activePatient.vitals;
-    // Agentic threshold check: If HR > 115, SpO2 < 93, Temp > 38.5, or BP is abnormal, run AI check automatically
     const isCritical = v.heartRate > 115 || v.spo2 < 93 || v.temperature > 38.5 || v.systolic > 160 || v.diastolic > 100 || v.systolic < 90;
     
     if (isCritical && !activePatient.analysis?.status.includes('CRITICAL')) {
       handleTriggerAnalysis();
     }
-  }, [patients, activePatientId, isAnalysing, mode]);
+  }, [patients, activePatientId, isAnalysing, mode, handleTriggerAnalysis]);
 
-  // FALL DETECTION LOOP
+  // 3. FALL DETECTION LOOP
   useEffect(() => {
     if (mode !== AppMode.WEARABLE || isEmergency) return;
     const activePatient = patients.find(p => p.id === activePatientId);
     if (!activePatient || activePatient.history.length < 5) return;
 
-    // Fast local check before calling AI
     const recentAccel = activePatient.vitals.accelerometer;
     const magnitude = Math.sqrt(recentAccel.x**2 + recentAccel.y**2 + recentAccel.z**2);
     
-    if (magnitude > 15) { // Spike detected
+    if (magnitude > 15) { // Impact detected
       const checkFall = async () => {
         const detected = await detectFalls(activePatient.history);
         if (detected) {
-          setIsEmergency(true);
-          broadcast('SOS_TRIGGER', true);
+          try {
+            await fetch('/api/sos', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ isEmergency: true })
+            });
+            setIsEmergency(true);
+          } catch (err) {
+            setIsEmergency(true);
+          }
         }
       };
       checkFall();
     }
-  }, [patients, activePatientId, mode, isEmergency, broadcast]);
+  }, [patients, activePatientId, mode, isEmergency]);
 
-  // WEARABLE DATA GENERATION
+  // 4. WEARABLE SIMULATION DATA DRIFT
   useEffect(() => {
     if (mode !== AppMode.WEARABLE) return;
 
-    const interval = setInterval(() => {
-      setPatients(prev => {
-        return prev.map(p => {
-          if (p.id !== activePatientId) return p;
+    const interval = setInterval(async () => {
+      const p = patients.find(pat => pat.id === activePatientId);
+      if (!p) return;
 
-          const jitter = (b: number, r: number) => b + (Math.random() * r - r/2);
-          
-          // Natural drift
-          let newHr = jitter(p.vitals.heartRate, 4);
-          let newSpo2 = jitter(p.vitals.spo2, 0.5);
-          let newSystolic = jitter(p.vitals.systolic, 2);
-          let newDiastolic = jitter(p.vitals.diastolic, 1.5);
-          
-          // Keep values within realistic bounds
-          newHr = Math.max(40, Math.min(200, newHr));
-          newSpo2 = Math.max(80, Math.min(100, newSpo2));
-          newSystolic = Math.max(70, Math.min(220, newSystolic));
-          newDiastolic = Math.max(40, Math.min(130, newDiastolic));
+      const jitter = (b: number, r: number) => b + (Math.random() * r - r/2);
+      
+      let newHr = jitter(p.vitals.heartRate, 4);
+      let newSpo2 = jitter(p.vitals.spo2, 0.5);
+      let newSystolic = jitter(p.vitals.systolic, 2);
+      let newDiastolic = jitter(p.vitals.diastolic, 1.5);
+      
+      newHr = Math.max(40, Math.min(200, newHr));
+      newSpo2 = Math.max(80, Math.min(100, newSpo2));
+      newSystolic = Math.max(70, Math.min(220, newSystolic));
+      newDiastolic = Math.max(40, Math.min(130, newDiastolic));
 
-          const newVitals: VitalSigns = {
-            ...p.vitals,
-            timestamp: Date.now(),
-            heartRate: Math.round(newHr),
-            spo2: Math.round(newSpo2),
-            systolic: Math.round(newSystolic),
-            diastolic: Math.round(newDiastolic),
-            temperature: jitter(p.vitals.temperature, 0.1),
-            steps: p.vitals.isSleeping ? p.vitals.steps : p.vitals.steps + (Math.random() > 0.85 ? 1 : 0),
-            accelerometer: {
-              x: jitter(0, 0.2),
-              y: jitter(0.2, 0.2),
-              z: jitter(9.8, 0.1)
-            }
-          };
+      const payload = {
+        patientId: activePatientId,
+        heartRate: Math.round(newHr),
+        spo2: Math.round(newSpo2),
+        systolic: Math.round(newSystolic),
+        diastolic: Math.round(newDiastolic),
+        temperature: Number(jitter(p.vitals.temperature, 0.1).toFixed(1)),
+        steps: p.vitals.isSleeping ? p.vitals.steps : p.vitals.steps + (Math.random() > 0.85 ? 1 : 0),
+        stressLevel: p.vitals.stressLevel,
+        isSleeping: p.vitals.isSleeping,
+        accelerometer: {
+          x: Number(jitter(0, 0.2).toFixed(2)),
+          y: Number(jitter(0.2, 0.2).toFixed(2)),
+          z: Number(jitter(9.8, 0.1).toFixed(2))
+        },
+        deviceName: 'Simulated Apple/Samsung Node',
+        battery: 91
+      };
 
-          const updatedPatient = {
-            ...p,
-            vitals: newVitals,
-            history: [...p.history, newVitals].slice(-500)
-          };
-
-          broadcast('PATIENT_UPDATE', updatedPatient);
-          return updatedPatient;
+      try {
+        await fetch('/api/wearable/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
         });
-      });
-    }, 1500); // 1.5s refresh for real-time feel
+      } catch (err) {
+        // Local fallback
+        setPatients(prev => prev.map(pat => {
+          if (pat.id !== activePatientId) return pat;
+          return {
+            ...pat,
+            vitals: { ...pat.vitals, ...payload, timestamp: Date.now() },
+            history: [...pat.history, { ...pat.vitals, ...payload, timestamp: Date.now() }].slice(-500)
+          };
+        }));
+      }
+    }, 1500);
 
     return () => clearInterval(interval);
-  }, [mode, activePatientId, broadcast]);
+  }, [mode, activePatientId, patients]);
 
-  const handleAddPatient = (newP: Patient) => {
-    setPatients(prev => [...prev, newP]);
-    broadcast('PATIENT_UPDATE', newP);
+  // 5. INTERFACE ACTIONS
+  const handleAddPatient = async (newP: Patient) => {
+    try {
+      const res = await fetch('/api/patients/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newP)
+      });
+      if (res.ok) {
+        setPatients(prev => [...prev, newP]);
+      }
+    } catch (err) {
+      setPatients(prev => [...prev, newP]);
+    }
+  };
+
+  const handleToggleSleep = async () => {
+    const p = patients.find(pat => pat.id === activePatientId);
+    if (!p) return;
+    try {
+      await fetch('/api/wearable/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          patientId: activePatientId,
+          isSleeping: !p.vitals.isSleeping
+        })
+      });
+    } catch (err) {
+      setPatients(prev => prev.map(pat => pat.id === activePatientId ? { ...pat, vitals: { ...pat.vitals, isSleeping: !pat.vitals.isSleeping } } : pat));
+    }
+  };
+
+  const handleToggleScan = async () => {
+    const p = patients.find(pat => pat.id === activePatientId);
+    if (!p) return;
+    try {
+      await fetch('/api/wearable/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          patientId: activePatientId,
+          isScanning: !p.vitals.isScanning
+        })
+      });
+    } catch (err) {
+      setPatients(prev => prev.map(pat => pat.id === activePatientId ? { ...pat, vitals: { ...pat.vitals, isScanning: !pat.vitals.isScanning } } : pat));
+    }
+  };
+
+  const handleSimulateAnomaly = async () => {
+    const payload = {
+      patientId: activePatientId,
+      heartRate: 158,
+      spo2: 89,
+      stressLevel: 98,
+      systolic: 195,
+      diastolic: 115,
+      accelerometer: { x: 25.4, y: -12.1, z: 2.3 }
+    };
+    try {
+      await fetch('/api/wearable/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+    } catch (err) {
+      setPatients(prev => prev.map(pat => pat.id === activePatientId ? { ...pat, vitals: { ...pat.vitals, ...payload } } : pat));
+    }
+  };
+
+  const handleCancelEmergency = async () => {
+    try {
+      await fetch('/api/sos', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ isEmergency: false })
+      });
+      await fetch('/api/wearable/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          patientId: activePatientId,
+          heartRate: 72,
+          spo2: 98,
+          stressLevel: 15,
+          systolic: 125,
+          diastolic: 82,
+          accelerometer: { x: 0, y: 0.2, z: 9.8 }
+        })
+      });
+      setIsEmergency(false);
+    } catch (err) {
+      setIsEmergency(false);
+      setPatients(prev => prev.map(p => p.id === activePatientId ? { ...p, vitals: { ...p.vitals, heartRate: 72, spo2: 98, stressLevel: 15, systolic: 125, diastolic: 82, accelerometer: { x: 0, y: 0.2, z: 9.8 } } } : p));
+    }
+  };
+
+  const handleTriggerSOS = async () => {
+    try {
+      await fetch('/api/sos', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ isEmergency: true })
+      });
+      setIsEmergency(true);
+    } catch (err) {
+      setIsEmergency(true);
+    }
+  };
+
+  // 6. REAL WEB BLUETOOTH PAIRING FOR HARDWARE SMARTWATCHES / CHEST STRAPS
+  const connectBluetooth = async () => {
+    // @ts-ignore
+    if (!navigator.bluetooth) {
+      alert('Web Bluetooth is only supported in secure contexts (HTTPS) and modern browsers like Chrome or Edge.');
+      return;
+    }
+    try {
+      setBleStatus('SEARCHING');
+      // @ts-ignore
+      const device = await navigator.bluetooth.requestDevice({
+        filters: [{ services: ['heart_rate'] }],
+        optionalServices: ['heart_rate']
+      });
+
+      setBleDeviceName(device.name || 'Bluetooth Heart Device');
+      setBleStatus('CONNECTING');
+
+      const server = await device.gatt?.connect();
+      const service = await server?.getPrimaryService('heart_rate');
+      const characteristic = await service?.getCharacteristic('heart_rate_measurement');
+
+      await characteristic?.startNotifications();
+      
+      characteristic?.addEventListener('characteristicvaluechanged', async (event: any) => {
+        const value = event.target.value;
+        const flags = value.getUint8(0);
+        const rate16 = flags & 0x1;
+        let heartRate = 0;
+        if (rate16) {
+          heartRate = value.getUint16(1, true);
+        } else {
+          heartRate = value.getUint8(1);
+        }
+
+        console.log('🔗 BLE Hardware Heart Rate:', heartRate);
+
+        // Send to backend sync to display in our dashboard in real-time
+        try {
+          await fetch('/api/wearable/sync', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              patientId: activePatientId,
+              heartRate: heartRate,
+              deviceName: device.name || 'Hardware BLE Monitor',
+              battery: 98
+            })
+          });
+        } catch (syncErr) {
+          console.error('Error syncing BLE vitals:', syncErr);
+        }
+      });
+
+      setBleStatus('CONNECTED');
+
+      device.addEventListener('gattserverdisconnected', () => {
+        setBleStatus('DISCONNECTED');
+        setBleDeviceName('');
+      });
+
+    } catch (err: any) {
+      console.warn('Bluetooth Pairing Canceled/Failed:', err);
+      setBleStatus('DISCONNECTED');
+    }
   };
 
   const currentPatient = patients.find(p => p.id === activePatientId) || patients[0];
@@ -216,7 +423,7 @@ const App: React.FC = () => {
                <i className="fas fa-terminal"></i>
              </div>
              <h3 className="text-3xl font-black uppercase mb-3 tracking-tighter">Guardian Hub</h3>
-             <p className="text-gray-500 text-lg leading-relaxed text-left font-medium">Central command interface. Manage multiple patients with agentic trend analysis via Gemini 3 Pro.</p>
+             <p className="text-gray-500 text-lg leading-relaxed text-left font-medium">Central command interface. Monitor synchronized smart watches, configure APIs, and run agent intelligence.</p>
           </button>
         </div>
 
@@ -226,7 +433,7 @@ const App: React.FC = () => {
               <span>Network Active</span>
            </div>
            <div className="w-px h-4 bg-gray-800"></div>
-           <span>API Key: {process.env.API_KEY ? 'DETECTED' : 'MISSING'}</span>
+           <span>API Server: {process.env.API_KEY ? 'SECURED_CLOUD_ROUTING' : 'OFFLINE_FALLBACK'}</span>
         </div>
       </div>
     );
@@ -236,22 +443,12 @@ const App: React.FC = () => {
     return (
       <WearableInterface 
         currentPatient={currentPatient}
-        onToggleSleep={() => {
-          setPatients(prev => prev.map(p => p.id === activePatientId ? { ...p, vitals: { ...p.vitals, isSleeping: !p.vitals.isSleeping } } : p));
-        }}
-        onToggleScan={() => {
-           setPatients(prev => prev.map(p => p.id === activePatientId ? { ...p, vitals: { ...p.vitals, isScanning: !p.vitals.isScanning } } : p));
-        }}
-        onSimulateAnomaly={() => {
-          setPatients(prev => prev.map(p => p.id === activePatientId ? { ...p, vitals: { ...p.vitals, heartRate: 158, spo2: 89, stressLevel: 98, systolic: 195, diastolic: 115, accelerometer: { x: 25.4, y: -12.1, z: 2.3 } } } : p));
-        }}
+        onToggleSleep={handleToggleSleep}
+        onToggleScan={handleToggleScan}
+        onSimulateAnomaly={handleSimulateAnomaly}
         isEmergency={isEmergency}
-        onCancelEmergency={() => { 
-          setIsEmergency(false); 
-          broadcast('SOS_TRIGGER', false); 
-          setPatients(prev => prev.map(p => p.id === activePatientId ? { ...p, vitals: { ...p.vitals, heartRate: 72, spo2: 98, stressLevel: 15, systolic: 125, diastolic: 82, accelerometer: { x: 0, y: 0.2, z: 9.8 } } } : p));
-        }}
-        onTriggerSOS={() => { setIsEmergency(true); broadcast('SOS_TRIGGER', true); }}
+        onCancelEmergency={handleCancelEmergency}
+        onTriggerSOS={handleTriggerSOS}
       />
     );
   }
@@ -265,6 +462,9 @@ const App: React.FC = () => {
       devices={devices}
       onTriggerAnalysis={handleTriggerAnalysis}
       isAnalysing={isAnalysing}
+      bleStatus={bleStatus}
+      bleDeviceName={bleDeviceName}
+      onConnectBluetooth={connectBluetooth}
     />
   );
 };
