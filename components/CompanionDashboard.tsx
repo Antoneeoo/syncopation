@@ -160,7 +160,7 @@ const CompanionDashboard: React.FC<CompanionProps> = ({
               onClick={() => setActiveTab(tab.id as any)}
               className={`w-full flex items-center gap-4 px-6 py-5 rounded-3xl transition-all font-bold text-sm ${activeTab === tab.id ? 'bg-blue-600 text-white shadow-xl shadow-blue-900/40' : 'text-gray-500 hover:bg-white/5'}`}
             >
-              <i className={`fas ${tab.icon} w-5 text-lg`}></i> {tab.label}
+              <i className={`fas ${tab.icon} w-5 text-lg`} /> {tab.label}
             </button>
           ))}
         </nav>
@@ -498,33 +498,94 @@ val request = Request.Builder()
 
           {activeTab === 'LOGS' && (
             <div className="space-y-10">
-              <div className="bg-gray-900/50 p-12 rounded-[3rem] border border-gray-800 shadow-xl">
-                <div className="flex justify-between items-center mb-10">
-                  <h3 className="text-2xl font-black tracking-tighter uppercase">Device Mesh Topology</h3>
-                  <div className="flex gap-4">
-                    <span className="flex items-center gap-2 text-[10px] text-gray-500 font-black uppercase tracking-widest">
-                       <i className="fas fa-circle text-cyan-500"></i> Active Nodes
-                    </span>
-                    <button className="text-[10px] font-black text-cyan-500 hover:text-cyan-400 transition-colors uppercase tracking-widest underline decoration-2 underline-offset-4">Rescan Network</button>
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                {/* Left Panel: Guardian Agent Intelligence Log */}
+                <div className="lg:col-span-1 flex flex-col">
+                  <div className="bg-gray-900/30 p-8 rounded-[2.5rem] border border-gray-800 flex-1 flex flex-col shadow-2xl relative overflow-hidden">
+                    <div className="absolute top-0 right-0 p-8 opacity-5">
+                      <i className="fas fa-robot text-8xl"></i>
+                    </div>
+                    <h3 className="text-xl font-black uppercase tracking-tighter mb-8 flex items-center gap-3">
+                      <i className="fas fa-brain text-cyan-400"></i> Agent Decisions
+                    </h3>
+
+                    {patient.analysis?.agentActions && patient.analysis.agentActions.length > 0 ? (
+                      <div className="space-y-6 overflow-y-auto pr-2 flex-1 custom-scrollbar">
+                        {patient.analysis.agentActions.map((action, i) => (
+                          <div key={i} className="flex gap-4 group items-start">
+                            <div className="flex flex-col items-center">
+                              <div className="w-2.5 h-2.5 rounded-full bg-cyan-500 shadow-[0_0_10px_cyan] mt-1.5 ring-4 ring-cyan-500/10"></div>
+                              <div className="w-px h-12 bg-gradient-to-b from-cyan-500/50 to-transparent my-1"></div>
+                            </div>
+                            <div className="bg-gray-800/20 p-4 rounded-2xl border border-gray-800 hover:bg-cyan-500/5 transition-colors flex-1">
+                              <div className="text-[9px] text-cyan-500 font-black uppercase tracking-wider mb-1">EXECUTION THREAD {i + 1}</div>
+                              <p className="text-xs text-gray-200 font-bold leading-relaxed">{action}</p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="flex-1 flex flex-col items-center justify-center text-center py-20 opacity-20">
+                        <i className="fas fa-microchip text-4xl mb-4"></i>
+                        <p className="text-xs font-black uppercase tracking-widest">
+                          Awaiting telemetry stream to execute diagnostic reasoning...
+                        </p>
+                      </div>
+                    )}
                   </div>
                 </div>
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                  {devices.map(d => (
-                    <div key={d.id} className="bg-black/40 p-8 rounded-[2.5rem] border border-gray-800 flex items-center justify-between group transition-all hover:bg-white/5">
-                      <div className="flex items-center gap-6">
-                        <div className={`w-16 h-16 rounded-2xl flex items-center justify-center text-2xl ${d.status === 'CONNECTED' ? 'bg-cyan-500/10 text-cyan-500' : 'bg-gray-800 text-gray-500'}`}>
-                          <i className={`fas ${d.type === 'WATCH' ? 'fa-clock-rotate-left' : 'fa-sensor'}`}></i>
-                        </div>
-                        <div>
-                          <div className="font-black text-lg tracking-tighter">{d.name}</div>
-                          <div className="text-[10px] text-gray-600 font-black uppercase tracking-widest">{d.status} • {d.battery}% BATT</div>
-                        </div>
-                      </div>
-                      {d.status === 'CONNECTED' && (
-                        <div className="w-3 h-3 rounded-full bg-cyan-500 shadow-[0_0_15px_rgba(6,182,212,0.8)]"></div>
-                      )}
+
+                {/* Right Panel: Biometric Log Streams */}
+                <div className="lg:col-span-2 flex flex-col">
+                  <div className="bg-gray-900/30 p-8 rounded-[2.5rem] border border-gray-800 flex-1 flex flex-col shadow-2xl">
+                    <div className="flex justify-between items-center mb-8">
+                      <h3 className="text-xl font-black uppercase tracking-tighter flex items-center gap-3">
+                        <i className="fas fa-terminal text-cyan-400"></i> Telemetry Logs
+                      </h3>
+                      <span className="text-[10px] text-gray-500 font-black uppercase tracking-widest">Last {patient.history.length} frames</span>
                     </div>
-                  ))}
+
+                    <div className="flex-1 overflow-x-auto border border-gray-800 rounded-2xl">
+                      <table className="w-full text-left border-collapse">
+                        <thead className="bg-gray-850/80 text-[9px] uppercase tracking-widest font-black text-gray-400">
+                          <tr>
+                            <th className="px-5 py-4">Time</th>
+                            <th className="px-5 py-4 text-center">BPM</th>
+                            <th className="px-5 py-4 text-center">SpO2</th>
+                            <th className="px-5 py-4 text-center">BP</th>
+                            <th className="px-5 py-4 text-center">Temp</th>
+                            <th className="px-5 py-4 text-center">Stress</th>
+                          </tr>
+                        </thead>
+                        <tbody className="text-xs">
+                          {patient.history.length > 0 ? (
+                            [...patient.history].reverse().slice(0, 50).map((log, i) => (
+                              <tr key={i} className="border-t border-gray-850 hover:bg-white/5 transition-colors">
+                                <td className="px-5 py-4 text-gray-400 font-mono text-xs">{new Date(log.timestamp).toLocaleTimeString()}</td>
+                                <td className="px-5 py-4 text-center font-bold text-red-500">{log.heartRate}</td>
+                                <td className="px-5 py-4 text-center text-blue-400 font-medium">{log.spo2}%</td>
+                                <td className="px-5 py-4 text-center text-pink-400">{log.systolic}/{log.diastolic}</td>
+                                <td className="px-5 py-4 text-center text-orange-400">{log.temperature.toFixed(1)}°C</td>
+                                <td className="px-5 py-4 text-center">
+                                  <span className={`px-2.5 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider ${
+                                    log.stressLevel > 80 ? 'bg-purple-500/10 text-purple-400' : 'bg-gray-800 text-gray-400'
+                                  }`}>
+                                    {log.stressLevel}/100
+                                  </span>
+                                </td>
+                              </tr>
+                            ))
+                          ) : (
+                            <tr>
+                              <td colSpan={6} className="text-center py-20 text-gray-600 italic">
+                                No raw telemetry logs streamed yet. Turn on wearable mode or simulate watch sync to populate frames.
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
