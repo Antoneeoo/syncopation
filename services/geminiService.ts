@@ -1,13 +1,13 @@
-
 import { GoogleGenAI, Type } from "@google/genai";
 import { VitalSigns, HealthAnalysis, Patient } from '../types';
 
-// Initializing the AI client with the provided environment API Key
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+// Initializing the AI client with the provided environment API Key, or a dummy key to prevent crash on startup if missing
+const apiKey = process.env.API_KEY || "AIzaSy_dummy_key_to_prevent_startup_error";
+const ai = new GoogleGenAI({ apiKey });
 
 /**
  * Perform a deep agentic analysis of patient vitals.
- * Uses gemini-3-pro-preview for advanced reasoning on time-series health data.
+ * Uses gemini-2.5-pro for advanced reasoning on time-series health data.
  */
 export const analyzePatientHealth = async (patient: Patient): Promise<HealthAnalysis> => {
   if (!process.env.API_KEY) {
@@ -44,7 +44,7 @@ export const analyzePatientHealth = async (patient: Patient): Promise<HealthAnal
 
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-3.1-pro-preview",
+      model: "gemini-2.5-pro",
       contents: prompt,
       config: {
         responseMimeType: "application/json",
@@ -99,7 +99,7 @@ export const detectFalls = async (history: VitalSigns[]): Promise<boolean> => {
 
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
+      model: "gemini-2.5-flash",
       contents: prompt,
       config: {
         responseMimeType: "application/json"
