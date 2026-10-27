@@ -1,8 +1,10 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { AppMode, VitalSigns, Patient, DeviceConnection } from './types';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { AppMode, VitalSigns, Patient, DeviceConnection, SyncMessage } from './types';
 import WearableInterface from './components/WearableInterface';
 import CompanionDashboard from './components/CompanionDashboard';
 import { analyzePatientHealth, detectFalls } from './services/geminiService';
+
+const BROADCAST_CHANNEL_NAME = 'vitalsync_enterprise_mesh';
 
 const DEFAULT_PATIENTS: Patient[] = [
   {
@@ -45,6 +47,8 @@ const App: React.FC = () => {
   const [bleStatus, setBleStatus] = useState<'DISCONNECTED' | 'SEARCHING' | 'CONNECTING' | 'CONNECTED'>('DISCONNECTED');
   const [bleDeviceName, setBleDeviceName] = useState<string>('');
 
+  const channelRef = useRef<BroadcastChannel | null>(null);
+
   // 1. BACKEND STATE SYNCHRONIZATION (Polling loop)
   useEffect(() => {
     const fetchState = async () => {
@@ -70,82 +74,42 @@ const App: React.FC = () => {
     return () => clearInterval(interval);
   }, []);
 
-  // 2. AUTOMATIC GUARDIAN LOOP: Autonomously monitor the active patient for abnormalities
-  const handleTriggerAnalysis = useCallback(async () => {
-    const activePatient = patients.find(p => p.id === activePatientId);
-    if (!activePatient || isAnalysing) return;
-
-    setIsAnalysing(true);
-    const result = await analyzePatientHealth(activePatient);
-    
-    try {
-      const res = await fetch('/api/patients/analysis', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          patientId: activePatientId,
-          analysis: result
-        })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.patient) {
-          setPatients(prev => prev.map(p => p.id === activePatientId ? data.patient : p));
-        }
+  // 2. Broadcast Channel Synchronization
+  useEffect(() => {
+    channelRef.current = new BroadcastChannel(BROADCAST_CHANNEL_NAME);
+    channelRef.current.onmessage = (event) => {
+      const msg: SyncMessage = event.data;
+      if (msg.type === 'PATIENT_UPDATE') {
+        setPatients(prev => prev.map(p => p.id === msg.payload.id ? msg.payload : p));
+      } else if (msg.type === 'SOS_TRIGGER') {
+        setIsEmergency(msg.payload);
+      } else if (msg.type === 'DEVICE_UPDATE') {
+        setDevices(msg.payload);
       }
-    } catch (err) {
-      // Fallback local update
-      setPatients(prev => prev.map(p => {
-        if (p.id !== activePatientId) return p;
-        return { ...p, analysis: result };
-      }));
-    } finally {
-      setIsAnalysing(false);
-    }
-  }, [patients, activePatientId, isAnalysing]);
+    };
+    return () => channelRef.current?.close();
+  }, []);
 
+  const broadcast = useCallback((type: SyncMessage['type'], payload: any) => {
+    channelRef.current?.postMessage({ type, payload });
+  }, []);
+
+  // 3. AUTOMATIC GUARDIAN LOOP: Autonomously monitor the active patient
   useEffect(() => {
     const activePatient = patients.find(p => p.id === activePatientId);
     if (!activePatient || isAnalysing || mode === AppMode.SELECT) return;
 
     const v = activePatient.vitals;
-    const isCritical = v.heartRate > 115 || v.spo2 < 93 || v.temperature > 38.5 || v.systolic > 160 || v.diastolic > 100 || v.systolic < 90;
+    // Agentic threshold check: If HR > 120 or SpO2 < 92, run AI check automatically
+    const isCritical = v.heartRate > 120 || v.spo2 < 92 || v.temperature > 38.5;
+    const alreadyAnalyzed = activePatient.analysis && (activePatient.analysis.status === 'CRITICAL' || activePatient.analysis.status === 'WARNING');
     
-    if (isCritical && !activePatient.analysis?.status.includes('CRITICAL')) {
+    if (isCritical && !alreadyAnalyzed) {
       handleTriggerAnalysis();
     }
-  }, [patients, activePatientId, isAnalysing, mode, handleTriggerAnalysis]);
+  }, [patients, activePatientId, isAnalysing, mode]);
 
-  // 3. FALL DETECTION LOOP
-  useEffect(() => {
-    if (mode !== AppMode.WEARABLE || isEmergency) return;
-    const activePatient = patients.find(p => p.id === activePatientId);
-    if (!activePatient || activePatient.history.length < 5) return;
-
-    const recentAccel = activePatient.vitals.accelerometer;
-    const magnitude = Math.sqrt(recentAccel.x**2 + recentAccel.y**2 + recentAccel.z**2);
-    
-    if (magnitude > 15) { // Impact detected
-      const checkFall = async () => {
-        const detected = await detectFalls(activePatient.history);
-        if (detected) {
-          try {
-            await fetch('/api/sos', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ isEmergency: true })
-            });
-            setIsEmergency(true);
-          } catch (err) {
-            setIsEmergency(true);
-          }
-        }
-      };
-      checkFall();
-    }
-  }, [patients, activePatientId, mode, isEmergency]);
-
-  // 4. WEARABLE SIMULATION DATA DRIFT
+  // 4. WEARABLE DATA GENERATION
   useEffect(() => {
     if (mode !== AppMode.WEARABLE) return;
 
@@ -155,11 +119,13 @@ const App: React.FC = () => {
 
       const jitter = (b: number, r: number) => b + (Math.random() * r - r/2);
       
-      let newHr = jitter(p.vitals.heartRate, 4);
-      let newSpo2 = jitter(p.vitals.spo2, 0.5);
-      let newSystolic = jitter(p.vitals.systolic, 2);
-      let newDiastolic = jitter(p.vitals.diastolic, 1.5);
+      const isAnomaly = p.vitals.heartRate > 110;
+      let newHr = isAnomaly ? jitter(p.vitals.heartRate, 3) : jitter(72, 6);
+      let newSpo2 = isAnomaly ? jitter(p.vitals.spo2, 0.5) : jitter(98, 1);
+      let newSystolic = isAnomaly ? jitter(p.vitals.systolic, 3) : jitter(120, 4);
+      let newDiastolic = isAnomaly ? jitter(p.vitals.diastolic, 1.5) : jitter(80, 2);
       
+      // Keep values within realistic bounds
       newHr = Math.max(40, Math.min(200, newHr));
       newSpo2 = Math.max(80, Math.min(100, newSpo2));
       newSystolic = Math.max(70, Math.min(220, newSystolic));
@@ -175,38 +141,94 @@ const App: React.FC = () => {
         steps: p.vitals.isSleeping ? p.vitals.steps : p.vitals.steps + (Math.random() > 0.85 ? 1 : 0),
         stressLevel: p.vitals.stressLevel,
         isSleeping: p.vitals.isSleeping,
+        isScanning: p.vitals.isScanning,
         accelerometer: {
           x: Number(jitter(0, 0.2).toFixed(2)),
           y: Number(jitter(0.2, 0.2).toFixed(2)),
           z: Number(jitter(9.8, 0.1).toFixed(2))
         },
-        deviceName: 'Simulated Apple/Samsung Node',
+        deviceName: 'Simulated Wearable Node',
         battery: 91
       };
 
       try {
-        await fetch('/api/wearable/sync', {
+        const res = await fetch('/api/wearable/sync', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
         });
+        if (res.ok) {
+          const data = await res.json();
+          // Backend updated, but let's update locally for instant responsiveness
+          setPatients(prev => prev.map(pat => {
+            if (pat.id !== activePatientId) return pat;
+            const nextVitals = { ...pat.vitals, ...payload, timestamp: Date.now() };
+            const updated = {
+              ...pat,
+              vitals: nextVitals,
+              history: [...pat.history, nextVitals].slice(-500)
+            };
+            broadcast('PATIENT_UPDATE', updated);
+            return updated;
+          }));
+        }
       } catch (err) {
-        // Local fallback
+        // Fallback local update
         setPatients(prev => prev.map(pat => {
           if (pat.id !== activePatientId) return pat;
-          return {
+          const nextVitals = { ...pat.vitals, ...payload, timestamp: Date.now() };
+          const updated = {
             ...pat,
-            vitals: { ...pat.vitals, ...payload, timestamp: Date.now() },
-            history: [...pat.history, { ...pat.vitals, ...payload, timestamp: Date.now() }].slice(-500)
+            vitals: nextVitals,
+            history: [...pat.history, nextVitals].slice(-500)
           };
+          broadcast('PATIENT_UPDATE', updated);
+          return updated;
         }));
       }
-    }, 1500);
+    }, 1500); // 1.5s refresh for real-time feel
 
     return () => clearInterval(interval);
-  }, [mode, activePatientId, patients]);
+  }, [mode, activePatientId, patients, broadcast]);
 
-  // 5. INTERFACE ACTIONS
+  // 5. TRIGGER DETAILED AI REASONING
+  const handleTriggerAnalysis = async () => {
+    const activePatient = patients.find(p => p.id === activePatientId);
+    if (!activePatient || isAnalysing) return;
+
+    setIsAnalysing(true);
+    const result = await analyzePatientHealth(activePatient);
+
+    try {
+      const res = await fetch('/api/patients/analysis', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          patientId: activePatientId,
+          analysis: result
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.patient) {
+          setPatients(prev => prev.map(p => p.id === activePatientId ? data.patient : p));
+          broadcast('PATIENT_UPDATE', data.patient);
+        }
+      }
+    } catch (err) {
+      // Fallback local update
+      setPatients(prev => prev.map(p => {
+        if (p.id !== activePatientId) return p;
+        const updated = { ...p, analysis: result };
+        broadcast('PATIENT_UPDATE', updated);
+        return updated;
+      }));
+    } finally {
+      setIsAnalysing(false);
+    }
+  };
+
+  // 6. ENROLL A PATIENT
   const handleAddPatient = async (newP: Patient) => {
     try {
       const res = await fetch('/api/patients/add', {
@@ -216,108 +238,15 @@ const App: React.FC = () => {
       });
       if (res.ok) {
         setPatients(prev => [...prev, newP]);
+        broadcast('PATIENT_UPDATE', newP);
       }
     } catch (err) {
       setPatients(prev => [...prev, newP]);
+      broadcast('PATIENT_UPDATE', newP);
     }
   };
 
-  const handleToggleSleep = async () => {
-    const p = patients.find(pat => pat.id === activePatientId);
-    if (!p) return;
-    try {
-      await fetch('/api/wearable/sync', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          patientId: activePatientId,
-          isSleeping: !p.vitals.isSleeping
-        })
-      });
-    } catch (err) {
-      setPatients(prev => prev.map(pat => pat.id === activePatientId ? { ...pat, vitals: { ...pat.vitals, isSleeping: !pat.vitals.isSleeping } } : pat));
-    }
-  };
-
-  const handleToggleScan = async () => {
-    const p = patients.find(pat => pat.id === activePatientId);
-    if (!p) return;
-    try {
-      await fetch('/api/wearable/sync', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          patientId: activePatientId,
-          isScanning: !p.vitals.isScanning
-        })
-      });
-    } catch (err) {
-      setPatients(prev => prev.map(pat => pat.id === activePatientId ? { ...pat, vitals: { ...pat.vitals, isScanning: !pat.vitals.isScanning } } : pat));
-    }
-  };
-
-  const handleSimulateAnomaly = async () => {
-    const payload = {
-      patientId: activePatientId,
-      heartRate: 158,
-      spo2: 89,
-      stressLevel: 98,
-      systolic: 195,
-      diastolic: 115,
-      accelerometer: { x: 25.4, y: -12.1, z: 2.3 }
-    };
-    try {
-      await fetch('/api/wearable/sync', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-    } catch (err) {
-      setPatients(prev => prev.map(pat => pat.id === activePatientId ? { ...pat, vitals: { ...pat.vitals, ...payload } } : pat));
-    }
-  };
-
-  const handleCancelEmergency = async () => {
-    try {
-      await fetch('/api/sos', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ isEmergency: false })
-      });
-      await fetch('/api/wearable/sync', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          patientId: activePatientId,
-          heartRate: 72,
-          spo2: 98,
-          stressLevel: 15,
-          systolic: 125,
-          diastolic: 82,
-          accelerometer: { x: 0, y: 0.2, z: 9.8 }
-        })
-      });
-      setIsEmergency(false);
-    } catch (err) {
-      setIsEmergency(false);
-      setPatients(prev => prev.map(p => p.id === activePatientId ? { ...p, vitals: { ...p.vitals, heartRate: 72, spo2: 98, stressLevel: 15, systolic: 125, diastolic: 82, accelerometer: { x: 0, y: 0.2, z: 9.8 } } } : p));
-    }
-  };
-
-  const handleTriggerSOS = async () => {
-    try {
-      await fetch('/api/sos', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ isEmergency: true })
-      });
-      setIsEmergency(true);
-    } catch (err) {
-      setIsEmergency(true);
-    }
-  };
-
-  // 6. REAL WEB BLUETOOTH PAIRING FOR HARDWARE SMARTWATCHES / CHEST STRAPS
+  // 7. REAL WEB BLUETOOTH PAIRING FOR HARDWARE SMARTWATCHES
   const connectBluetooth = async () => {
     // @ts-ignore
     if (!navigator.bluetooth) {
@@ -354,7 +283,6 @@ const App: React.FC = () => {
 
         console.log('🔗 BLE Hardware Heart Rate:', heartRate);
 
-        // Send to backend sync to display in our dashboard in real-time
         try {
           await fetch('/api/wearable/sync', {
             method: 'POST',
@@ -443,12 +371,109 @@ const App: React.FC = () => {
     return (
       <WearableInterface 
         currentPatient={currentPatient}
-        onToggleSleep={handleToggleSleep}
-        onToggleScan={handleToggleScan}
-        onSimulateAnomaly={handleSimulateAnomaly}
+        onToggleSleep={async () => {
+          const newVal = !currentPatient.vitals.isSleeping;
+          const payload = { patientId: activePatientId, isSleeping: newVal };
+          try {
+            await fetch('/api/wearable/sync', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload)
+            });
+          } catch (e) {}
+          setPatients(prev => prev.map(p => p.id === activePatientId ? { ...p, vitals: { ...p.vitals, isSleeping: newVal } } : p));
+          broadcast('PATIENT_UPDATE', { ...currentPatient, vitals: { ...currentPatient.vitals, isSleeping: newVal } });
+        }}
+        onToggleScan={async () => {
+          const newVal = !currentPatient.vitals.isScanning;
+          const payload = { patientId: activePatientId, isScanning: newVal };
+          try {
+            await fetch('/api/wearable/sync', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload)
+            });
+          } catch (e) {}
+          setPatients(prev => prev.map(p => p.id === activePatientId ? { ...p, vitals: { ...p.vitals, isScanning: newVal } } : p));
+          broadcast('PATIENT_UPDATE', { ...currentPatient, vitals: { ...currentPatient.vitals, isScanning: newVal } });
+        }}
+        onSimulateAnomaly={async () => {
+          const payload = {
+            patientId: activePatientId,
+            heartRate: 145,
+            spo2: 89,
+            stressLevel: 95,
+            systolic: 175,
+            diastolic: 105,
+            temperature: 38.9,
+            accelerometer: { x: 25.4, y: -12.1, z: 2.3 }
+          };
+          try {
+            await fetch('/api/wearable/sync', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload)
+            });
+          } catch (e) {}
+          setPatients(prev => prev.map(p => p.id === activePatientId ? {
+            ...p,
+            vitals: { ...p.vitals, ...payload },
+            history: [...p.history, { ...p.vitals, ...payload, timestamp: Date.now() }].slice(-500)
+          } : p));
+          broadcast('PATIENT_UPDATE', {
+            ...currentPatient,
+            vitals: { ...currentPatient.vitals, ...payload },
+            history: [...currentPatient.history, { ...currentPatient.vitals, ...payload, timestamp: Date.now() }].slice(-500)
+          });
+        }}
         isEmergency={isEmergency}
-        onCancelEmergency={handleCancelEmergency}
-        onTriggerSOS={handleTriggerSOS}
+        onCancelEmergency={async () => {
+          setIsEmergency(false);
+          broadcast('SOS_TRIGGER', false);
+          const payload = {
+            patientId: activePatientId,
+            heartRate: 72,
+            spo2: 98,
+            stressLevel: 15,
+            systolic: 125,
+            diastolic: 82,
+            temperature: 36.6,
+            accelerometer: { x: 0, y: 0.2, z: 9.8 }
+          };
+          try {
+            await fetch('/api/sos', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ isEmergency: false })
+            });
+            await fetch('/api/wearable/sync', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload)
+            });
+          } catch (e) {}
+          setPatients(prev => prev.map(p => p.id === activePatientId ? {
+            ...p,
+            vitals: { ...p.vitals, ...payload },
+            history: [...p.history, { ...p.vitals, ...payload, timestamp: Date.now() }].slice(-500)
+          } : p));
+          broadcast('PATIENT_UPDATE', {
+            ...currentPatient,
+            vitals: { ...currentPatient.vitals, ...payload },
+            history: [...currentPatient.history, { ...currentPatient.vitals, ...payload, timestamp: Date.now() }].slice(-500)
+          });
+        }}
+        onTriggerSOS={async () => {
+          setIsEmergency(true);
+          broadcast('SOS_TRIGGER', true);
+          try {
+            await fetch('/api/sos', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ isEmergency: true })
+            });
+          } catch (e) {}
+        }}
       />
     );
   }
